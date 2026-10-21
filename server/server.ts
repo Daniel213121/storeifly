@@ -4,6 +4,7 @@ import cors from "cors";
 import categoryRouter from "./routes/categoryRouters.js";
 import uploadRouter from "./routes/uploadRoutes.js";
 import storeRouter from "./routes/storeRoutes.js";
+import productRouter from "./routes/productRoutes.js";
 import { handleUploadError } from "./middleware/upload.js";
 
 const app = express();
@@ -24,6 +25,7 @@ app.get('/', (_req: Request, res: Response) => {
 app.use("/api/categories", categoryRouter);
 app.use("/api/upload", uploadRouter);
 app.use("/api/stores", storeRouter);
+app.use("/api/products", productRouter);
 
 // Must come after the routes: turns multer errors into 400s
 app.use(handleUploadError);
