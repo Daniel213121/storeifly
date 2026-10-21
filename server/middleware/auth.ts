@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { jwtVerify, createRemoteJWKSet } from 'jose';
+import { jwtVerify, createRemoteJWKSet, JWTPayload } from 'jose';
 import { findNeonUser } from '../services/neonUser.js';
 import { prisma } from '../config/prisma.js';
 
@@ -34,45 +34,51 @@ try {
 }
 
 // Verifies authentication token using Neon Auth JWKS (jose JwtVerify)
-export const verifyAuthToken = async (token: string): 
+// Returns null for invalid, expired, deleted or banned users.
+// Database errors are thrown so they surface as 500s instead of fake 401s.
+export const verifyAuthToken = async (token: string | undefined):
 Promise<AuthUser | null> => {
     if (!token || !neonIssuer || !neonJWKS) return null;
-    
+
+    let payload: JWTPayload;
     try {
-        const { payload } = await jwtVerify(token, neonJWKS, {issuer: neonIssuer});
-        if (!payload || (!payload.sub && !payload.email)) return null;
-
-        const userEmail = String(payload.email || "").toLowerCase()
-        const userId = String(payload.sub || payload.id || "");
-        
-        const u = await findNeonUser({ 
-           ...(userId ? { id: userId } : {}), 
-           ...(userEmail ? { email: userEmail } : {}),
-        });
-        
-        const effectiveId = u?.id || userId;
-        const effectiveEmail = u?.email || userEmail;
-        const effectiveName = u?.name || String(payload.name || userEmail.split("@")[0]);
-        const store = await prisma.stores.findFirst({ where: { merchant_id: effectiveId } });
-
-        let role: 'admin' | 'merchant' | 'customer' | null = null;
-        if (u?.role === 'admin' || payload.role === 'admin' || effectiveEmail.includes("admin@")) {
-            role = 'admin';
-        } else if (store || u?.role === 'merchant' || payload.role === 'merchant') {
-            role = 'merchant';
-        }
-
-        return {
-            id: effectiveId,
-            email: effectiveEmail,
-            name: effectiveName,
-            role,
-            store_id: role === 'admin' ? null : store?.id || null,
-        };
-    } catch (error) {
-        console.error('Invalid authentication token:', error);
+        ({ payload } = await jwtVerify(token, neonJWKS, { issuer: neonIssuer }));
+    } catch {
         return null;
     }
+    if (!payload.sub && !payload.email) return null;
+
+    const userEmail = String(payload.email || "").toLowerCase();
+    const userId = String(payload.sub || payload.id || "");
+
+    const u = await findNeonUser({
+        ...(userId ? { id: userId } : {}),
+        ...(userEmail ? { email: userEmail } : {}),
+    });
+
+    // User was deleted after the token was issued
+    if (!u) return null;
+
+    // User is banned (permanently, or until banExpires)
+    if (u.banned && (!u.banExpires || u.banExpires > new Date())) return null;
+
+    const store = await prisma.stores.findFirst({ where: { merchant_id: u.id } });
+
+    // Role comes only from the database, never from the email or token claims
+    let role: 'admin' | 'merchant' | 'customer' = 'customer';
+    if (u.role === 'admin') {
+        role = 'admin';
+    } else if (store || u.role === 'merchant') {
+        role = 'merchant';
+    }
+
+    return {
+        id: u.id,
+        email: u.email,
+        name: u.name || u.email.split("@")[0],
+        role,
+        store_id: role === 'admin' ? null : store?.id ?? null,
+    };
 }
 
 export const requireAuth = async (req: AuthenticatedRequest, res: Response, next: NextFunction) : Promise<void> => {
